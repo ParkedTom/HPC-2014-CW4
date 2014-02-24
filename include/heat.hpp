@@ -5,7 +5,7 @@
 #include <iostream>
 #include <cstdio>
 #include <cstdlib>
-#include <cstdint>
+#include <stdint.h>
 
 namespace hpce{
 	

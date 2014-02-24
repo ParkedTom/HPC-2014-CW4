@@ -2,7 +2,7 @@
 
 #include <stdexcept>
 #include <cmath>
-#include <cstdint>
+#include <stdint.h>
 #include <memory>
 #include <cstdio>
 
