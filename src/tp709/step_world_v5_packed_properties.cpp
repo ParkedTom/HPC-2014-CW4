@@ -79,7 +79,7 @@ std::string LoadSource(const char *fileName)
     );
 }
 	
-void StepWorldV3OpenCL(world_t &world, float dt, unsigned n)
+void StepWorldV5Kernel(world_t &world, float dt, unsigned n)
 {
 	//OpenCL Platforms and Devices
 	std::vector<cl::Platform> platforms;
@@ -125,7 +125,7 @@ void StepWorldV3OpenCL(world_t &world, float dt, unsigned n)
 	//create OpenCL context
 	cl::Context context(devices);
 	
-	std::string kernelSource=LoadSource("step_world_v3_kernel.cl");
+	std::string kernelSource=LoadSource("step_world_v5_kernel.cl");
 
 	cl::Program::Sources sources;   // A vector of (data,length) pairs
 	sources.push_back(std::make_pair(kernelSource.c_str(), kernelSource.size()+1)); // push on our single string
@@ -146,8 +146,8 @@ void StepWorldV3OpenCL(world_t &world, float dt, unsigned n)
 	//Allocate GPU buffers
 	size_t cbBuffer=4*world.w*world.h;
 	cl::Buffer buffProperties(context, CL_MEM_READ_ONLY, cbBuffer);
-	cl::Buffer buffState(context, CL_MEM_READ_ONLY, cbBuffer);
-	cl::Buffer buffBuffer(context, CL_MEM_WRITE_ONLY, cbBuffer);
+	cl::Buffer buffState(context, CL_MEM_READ_WRITE, cbBuffer);
+	cl::Buffer buffBuffer(context, CL_MEM_READ_WRITE, cbBuffer);
 	
 	//create kernel_xy instance
 	cl::Kernel kernel(program, "kernel_xy");
@@ -160,6 +160,38 @@ void StepWorldV3OpenCL(world_t &world, float dt, unsigned n)
 	// This is our temporary working space
 	std::vector<float> buffer(w*h);
 	
+	//created packed properties buffer
+	std::vector<uint32_t> packed(w*h, 0);
+
+	for(unsigned y=0;y<h;y++)
+	{
+		for(unsigned x=0;x<w;x++)
+		{
+			packed[y*w + x] = world.properties[y*w + x];
+			if(!((packed[y*w + x] & Cell_Fixed) || (packed[y*w + x] & Cell_Insulator)))
+			{
+				if(world.properties[y*w + x - w] & Cell_Insulator) //top
+				{
+					packed[y*w + x] += 0x4;
+				}
+				if(world.properties[y*w + x + w] & Cell_Insulator) //bottom
+				{
+					packed[y*w + x] += 0x8;
+				}
+				if(world.properties[y*w + x-1] & Cell_Insulator) //left
+				{
+					packed[y*w + x] +=0x10;
+				}
+				if(world.properties[y*w + x+1] & Cell_Insulator) //right
+				{
+					packed[y*w + x] += 0x20;
+				}
+			}
+			//std::cout<<packed[y*w + x]<<'\t';
+		}
+		//std::cout<<'\n'<<'\n';
+	}
+	
 	//set kernel_xy arguments
 	kernel.setArg(0, buffState);
 	kernel.setArg(1, buffProperties);
@@ -169,37 +201,38 @@ void StepWorldV3OpenCL(world_t &world, float dt, unsigned n)
 	
 	//create command queue
 	cl::CommandQueue queue(context, device);
-	queue.enqueueWriteBuffer(buffProperties, CL_TRUE, 0, cbBuffer, &world.properties[0]);
+	queue.enqueueWriteBuffer(buffProperties, CL_TRUE, 0, cbBuffer, &packed[0]);
+	//copy State to GPU synchronously
+	queue.enqueueWriteBuffer(buffState, CL_TRUE, 0, cbBuffer, &world.state[0]);
 	
 	
 	
 	for(unsigned t=0;t<n;t++){
 		//y : [0,h)
-		//x : [0,w)
-		cl::Event evCopiedState;
-		queue.enqueueWriteBuffer(buffState, CL_FALSE, 0, cbBuffer, &world.state[0], NULL, &evCopiedState);
-		
+		//x : [0,w)		
 		//create iteration space
 		cl::NDRange offset(0,0);
 		cl::NDRange globalSize(w,h);
 		cl::NDRange localSize=cl::NullRange;
 		
-		std::vector<cl::Event> kernelDependencies(1, evCopiedState);
-		cl::Event evExecutedKernel;
-		queue.enqueueNDRangeKernel(kernel, offset, globalSize, localSize, &kernelDependencies, &evExecutedKernel);
+		queue.enqueueNDRangeKernel(kernel, offset, globalSize, localSize);
 		
-		std::vector<cl::Event> copyBackDependencies(1,evExecutedKernel);
-		queue.enqueueReadBuffer(buffBuffer, CL_TRUE, 0, cbBuffer, &buffer[0], &copyBackDependencies);
+		queue.enqueueBarrier();
+		
+		
 		
 		// All cells have now been calculated and placed in buffer, so we replace
 		// the old state with the new state
-		std::swap(world.state, buffer);
+		std::swap(buffBuffer, buffState);
 		// Swapping rather than assigning is cheaper: just a pointer swap
 		// rather than a memcpy, so O(1) rather than O(w*h)
+		kernel.setArg(0, buffState);
+		kernel.setArg(4, buffBuffer);
 	
 		world.t += dt; // We have moved the world forwards in time
 		
 	} // end of for(t...
+	queue.enqueueReadBuffer(buffState, CL_TRUE, 0, cbBuffer, &world.state[0]);
 
 }
 
@@ -228,7 +261,7 @@ int main(int argc, char *argv[])
 		std::cerr<<"Loaded world with w="<<world.w<<", h="<<world.h<<std::endl;
 		
 		std::cerr<<"Stepping by dt="<<dt<<" for n="<<n<<std::endl;
-		hpce::tp709::StepWorldV3OpenCL(world, dt, n);
+		hpce::tp709::StepWorldV5Kernel(world, dt, n);
 		
 		hpce::SaveWorld(std::cout, world, binary);
 	}catch(const std::exception &e){
